@@ -3,7 +3,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 # =============================================================================
-# NIRUCON Void Linux VPI - Void Post Install for glibc base systems
+# NIRUCON Void Linux VPI v1.2.0 - Void Post Install for glibc base systems
 # =============================================================================
 #
 # Target:
@@ -161,13 +161,36 @@ enable_service() {
     return 0
   fi
 
-  if [[ -e "/var/service/$svc" ]]; then
+  if [[ ! -e "/var/service/$svc" ]]; then
+    sudo ln -s "/etc/sv/$svc" "/var/service/$svc"
+    ok "Service enabled: $svc"
+  else
     ok "Service already enabled: $svc"
-    return 0
   fi
 
-  sudo ln -s "/etc/sv/$svc" "/var/service/$svc"
-  ok "Service enabled: $svc"
+  # Bring the service up now when possible. This is safe if it is already running.
+  sudo sv up "$svc" >/dev/null 2>&1 || warn "Service could not be started now: $svc"
+}
+
+disable_service() {
+  # Disable a runit service without deleting the service definition in /etc/sv.
+  local svc="$1"
+
+  if [[ -e "/var/service/$svc" ]]; then
+    sudo sv down "$svc" >/dev/null 2>&1 || true
+    sudo rm -f "/var/service/$svc"
+    ok "Service disabled: $svc"
+  else
+    ok "Service already disabled: $svc"
+  fi
+}
+
+service_enabled() {
+  [[ -e "/var/service/$1" ]]
+}
+
+service_running() {
+  sv status "$1" 2>/dev/null | grep -q '^run:'
 }
 
 print_header() {
@@ -181,7 +204,7 @@ print_header() {
   echo "This script installs:"
   echo "  - dwm, dmenu, st and slock from your suckless repo"
   echo "  - Xorg and SDDM"
-  echo "  - NetworkManager and basic desktop services"
+  echo "  - network services using a safe selectable backend"
   echo "  - PipeWire desktop audio for music/video playback"
   echo "  - fish, kitty, starship, zoxide and NIRU Noir config"
   echo "  - common desktop tools, fonts and media applications"
@@ -271,6 +294,26 @@ PATCH_STATUSBAR=1
 INSTALL_MEDIA_APPS=1
 INSTALL_NEXTCLOUD=1
 INSTALL_TAILSCALE=0
+INSTALL_HELIUM=1
+NETWORK_BACKEND="preserve"
+
+# Network handling is intentionally conservative. Fresh Void installs often use
+# dhcpcd + wpa_supplicant, while desktop installs often use NetworkManager. Running
+# both at the same time can cause changing IP addresses and dropped SSH sessions.
+echo
+echo "Select network backend:"
+echo "  1) Preserve current active network services (safest, default)"
+echo "  2) NetworkManager only (recommended for laptops after local access is confirmed)"
+echo "  3) Classic Void: dhcpcd + wpa_supplicant only"
+echo
+read -r -p "Network choice [1/2/3, default 1]: " NETWORK_CHOICE
+NETWORK_CHOICE="${NETWORK_CHOICE:-1}"
+case "$NETWORK_CHOICE" in
+  1) NETWORK_BACKEND="preserve" ;;
+  2) NETWORK_BACKEND="networkmanager" ;;
+  3) NETWORK_BACKEND="classic" ;;
+  *) fail "Invalid network choice."; exit 1 ;;
+esac
 
 ask_yes_no "Enable/install Void nonfree repository packages if available?" "Y" && INSTALL_NONFREE=1 || INSTALL_NONFREE=0
 ask_yes_no "Install Bluetooth support?" "Y" && INSTALL_BLUETOOTH=1 || INSTALL_BLUETOOTH=0
@@ -280,12 +323,14 @@ ask_yes_no "Install Flatpak support?" "Y" && INSTALL_FLATPAK=1 || INSTALL_FLATPA
 ask_yes_no "Install media/music applications?" "Y" && INSTALL_MEDIA_APPS=1 || INSTALL_MEDIA_APPS=0
 ask_yes_no "Install Nextcloud desktop client if available?" "Y" && INSTALL_NEXTCLOUD=1 || INSTALL_NEXTCLOUD=0
 ask_yes_no "Install Tailscale if available?" "N" && INSTALL_TAILSCALE=1 || INSTALL_TAILSCALE=0
+ask_yes_no "Install Helium Browser AppImage?" "Y" && INSTALL_HELIUM=1 || INSTALL_HELIUM=0
 ask_yes_no "Set fish as default shell for $USER?" "N" && SET_FISH_DEFAULT=1 || SET_FISH_DEFAULT=0
 ask_yes_no "Patch dwm-status.sh for Void/XBPS?" "Y" && PATCH_STATUSBAR=1 || PATCH_STATUSBAR=0
 
 echo
 phase "Selected configuration"
 [[ "$IS_LAPTOP" -eq 1 ]] && echo "Machine type:      Laptop" || echo "Machine type:      Workstation"
+echo "Network backend:   $NETWORK_BACKEND"
 echo "Nonfree repo:      $([[ "$INSTALL_NONFREE" -eq 1 ]] && echo yes || echo no)"
 echo "Bluetooth:         $([[ "$INSTALL_BLUETOOTH" -eq 1 ]] && echo yes || echo no)"
 echo "CUPS printer:      $([[ "$INSTALL_CUPS" -eq 1 ]] && echo yes || echo no)"
@@ -294,6 +339,7 @@ echo "Flatpak:           $([[ "$INSTALL_FLATPAK" -eq 1 ]] && echo yes || echo no
 echo "Media apps:        $([[ "$INSTALL_MEDIA_APPS" -eq 1 ]] && echo yes || echo no)"
 echo "Nextcloud:         $([[ "$INSTALL_NEXTCLOUD" -eq 1 ]] && echo yes || echo no)"
 echo "Tailscale:         $([[ "$INSTALL_TAILSCALE" -eq 1 ]] && echo yes || echo no)"
+echo "Helium AppImage:   $([[ "$INSTALL_HELIUM" -eq 1 ]] && echo yes || echo no)"
 echo "fish default:      $([[ "$SET_FISH_DEFAULT" -eq 1 ]] && echo yes || echo no)"
 echo "Patch statusbar:   $([[ "$PATCH_STATUSBAR" -eq 1 ]] && echo yes || echo no)"
 echo
@@ -347,7 +393,7 @@ DESKTOP_PACKAGES=(
   xorg xinit xauth xsetroot xrandr xrdb xclip xsel xprop xwininfo
   setxkbmap xkeyboard-config
   sddm
-  NetworkManager network-manager-applet
+  NetworkManager network-manager-applet dhcpcd wpa_supplicant
   libX11-devel libXft-devel libXinerama-devel libXrandr-devel libXext-devel
   libXrender-devel libXfixes-devel harfbuzz-devel imlib2-devel freetype-devel fontconfig-devel
   fontconfig dejavu-fonts-ttf noto-fonts-ttf noto-fonts-emoji font-awesome
@@ -359,6 +405,7 @@ DESKTOP_PACKAGES=(
   lm_sensors smartmontools pciutils usbutils
   neovim vim micro
   lxappearance papirus-icon-theme adwaita-icon-theme p7zip
+  fuse fuse3
 )
 
 install_pkg_list "${DESKTOP_PACKAGES[@]}"
@@ -427,6 +474,98 @@ fi
 if [[ "$INSTALL_TAILSCALE" -eq 1 ]]; then
   phase "Installing Tailscale if available"
   install_pkg_list tailscale
+fi
+
+install_helium_appimage() {
+  phase "Installing Helium Browser AppImage"
+
+  # Helium is not packaged in the official Void repositories. The safest Void
+  # route is the upstream AppImage from imputnet/helium-linux releases.
+  # This function is intentionally user-local: it does not place untracked files
+  # in /usr/bin and it can be re-run to update Helium.
+  local app_dir="$HOME/.local/bin"
+  local app_path="$app_dir/helium"
+  local desktop_dir="$HOME/.local/share/applications"
+  local desktop_file="$desktop_dir/helium.desktop"
+  local tmp_dir api_json url
+
+  mkdir -p "$app_dir" "$desktop_dir"
+  tmp_dir="$(mktemp -d)"
+
+  # AppImages usually need FUSE/libfuse support. Install both package names
+  # defensively because availability may vary by Void snapshot.
+  install_pkg_list fuse fuse3
+
+  say "Resolving latest Helium AppImage release from GitHub..."
+
+  api_json="$tmp_dir/helium-release.json"
+  if curl -fsSL "https://api.github.com/repos/imputnet/helium-linux/releases/latest" -o "$api_json"; then
+    url="$(grep -E '"browser_download_url":' "$api_json" \
+      | cut -d '"' -f4 \
+      | grep -Ei 'helium.*x86_64.*\.AppImage$|helium.*\.AppImage$' \
+      | head -n1 || true)"
+  else
+    url=""
+  fi
+
+  # Conservative fallback. If the project ever provides a stable latest asset
+  # called helium.AppImage, this will work without the API parser.
+  if [[ -z "${url:-}" ]]; then
+    warn "Could not resolve AppImage through GitHub API. Trying stable latest/download fallback."
+    url="https://github.com/imputnet/helium-linux/releases/latest/download/helium.AppImage"
+  fi
+
+  say "Downloading Helium AppImage: $url"
+  if ! curl -fL --retry 3 --connect-timeout 20 -o "$tmp_dir/helium.AppImage" "$url"; then
+    warn "Helium AppImage download failed. Leaving any existing local Helium installation untouched."
+    rm -rf "$tmp_dir"
+    return 0
+  fi
+
+  if [[ ! -s "$tmp_dir/helium.AppImage" ]]; then
+    warn "Downloaded Helium AppImage is empty. Skipping installation."
+    rm -rf "$tmp_dir"
+    return 0
+  fi
+
+  chmod +x "$tmp_dir/helium.AppImage"
+
+  # Keep a backup of the previous AppImage if present.
+  if [[ -f "$app_path" ]]; then
+    cp -a "$app_path" "$app_path.bak.$(date +%Y%m%d-%H%M%S)" || true
+  fi
+
+  mv "$tmp_dir/helium.AppImage" "$app_path"
+  chmod +x "$app_path"
+
+  cat > "$desktop_file" <<EOF
+[Desktop Entry]
+Name=Helium
+Comment=Private Chromium-based browser
+Exec=$app_path %U
+Terminal=false
+Type=Application
+Categories=Network;WebBrowser;
+MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
+StartupNotify=true
+EOF
+
+  chmod 644 "$desktop_file"
+
+  # Refresh desktop database when available. This is optional.
+  if have_cmd update-desktop-database; then
+    update-desktop-database "$desktop_dir" 2>/dev/null || true
+  fi
+
+  rm -rf "$tmp_dir"
+
+  ok "Helium installed to $app_path"
+  ok "Desktop launcher written to $desktop_file"
+  note "Run Helium from rofi/dmenu with: helium"
+}
+
+if [[ "$INSTALL_HELIUM" -eq 1 ]]; then
+  install_helium_appimage
 fi
 
 # -----------------------------------------------------------------------------
@@ -512,10 +651,33 @@ phase "Enabling runit services"
 
 enable_service dbus
 enable_service elogind
-enable_service NetworkManager
 enable_service socklog-unix
 enable_service nanoklogd
 enable_service chronyd
+
+phase "Configuring network services"
+case "$NETWORK_BACKEND" in
+  preserve)
+    note "Preserving current network setup. No network service will be disabled."
+    if service_enabled NetworkManager; then ok "NetworkManager is currently enabled."; fi
+    if service_enabled dhcpcd; then ok "dhcpcd is currently enabled."; fi
+    if service_enabled wpa_supplicant; then ok "wpa_supplicant is currently enabled."; fi
+    warn "If both NetworkManager and dhcpcd/wpa_supplicant are enabled, choose one backend after local access is confirmed."
+    ;;
+  networkmanager)
+    warn "Using NetworkManager only. Disabling dhcpcd and standalone wpa_supplicant to prevent IP changes and SSH drops."
+    disable_service dhcpcd
+    disable_service wpa_supplicant
+    enable_service NetworkManager
+    ;;
+  classic)
+    warn "Using classic Void networking. Disabling NetworkManager."
+    disable_service NetworkManager
+    enable_service wpa_supplicant
+    enable_service dhcpcd
+    ;;
+esac
+
 enable_service sddm
 
 # PipeWire services may exist as system-level runit services on Void. If they are
@@ -798,7 +960,7 @@ italic_font auto
 bold_italic_font auto
 font_size 12.0
 
-shell /usr/bin/fish
+# Do not hardcode a shell here. Kitty should use the user's login shell.
 
 background #0b0b0b
 foreground #d6d1c4
@@ -864,8 +1026,7 @@ bold = { family = "JetBrainsMono Nerd Font", style = "Bold" }
 italic = { family = "JetBrainsMono Nerd Font", style = "Italic" }
 size = 12.0
 
-[terminal.shell]
-program = "/usr/bin/fish"
+# Do not hardcode terminal.shell here. Alacritty should use the user's login shell.
 
 [colors.primary]
 background = "#0b0b0b"
@@ -962,6 +1123,24 @@ sudo mkdir -p "/usr/share/sddm/themes/$SDDM_THEME_ID"
 sudo rsync -a --delete "$SDDM_THEME_SOURCE/" "/usr/share/sddm/themes/$SDDM_THEME_ID/"
 sudo chown -R root:root "/usr/share/sddm/themes/$SDDM_THEME_ID"
 
+phase "Patching SDDM theme host label if needed"
+# Older/local NIRU Noir theme builds could contain a hardcoded host label such as
+# STUDIO. In QML, sddm.hostName exposes the real hostname from the system, so use
+# that whenever a literal STUDIO label is found. This keeps the rune/noir look but
+# prevents the login screen from showing the wrong machine name.
+if sudo grep -RIl --include='*.qml' --include='*.conf' --include='*.desktop' 'STUDIO' "/usr/share/sddm/themes/$SDDM_THEME_ID" >/tmp/nirucon-vpi-sddm-studio-files 2>/dev/null; then
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    sudo cp -a "$f" "$f.bak.$(date +%Y%m%d-%H%M%S)"
+    sudo sed -i -E 's/text:[[:space:]]*"STUDIO"/text: sddm.hostName/g; s/"STUDIO"/sddm.hostName/g' "$f" || true
+    warn "Patched hardcoded SDDM host label in: $f"
+  done < /tmp/nirucon-vpi-sddm-studio-files
+  rm -f /tmp/nirucon-vpi-sddm-studio-files
+else
+  rm -f /tmp/nirucon-vpi-sddm-studio-files
+  ok "No hardcoded STUDIO label found in SDDM theme."
+fi
+
 sudo mkdir -p /etc/sddm.conf.d
 sudo tee /etc/sddm.conf.d/10-nirucon.conf >/dev/null <<SDDMCONF
 [Theme]
@@ -991,6 +1170,12 @@ export XDG_CURRENT_DESKTOP=dwm
 export DESKTOP_SESSION=dwm
 
 [[ -r "$HOME/.profile" ]] && . "$HOME/.profile"
+
+# Ensure a DBus session exists for tray apps, Polkit, notifications and portals.
+if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]] && command -v dbus-run-session >/dev/null 2>&1 && [[ "${1:-}" != "--dbus-started" ]]; then
+  exec dbus-run-session "$0" --dbus-started "$@"
+fi
+[[ "${1:-}" == "--dbus-started" ]] && shift || true
 
 if command -v xrdb >/dev/null 2>&1 && [[ -r "$HOME/.Xresources" ]]; then
   xrdb -merge "$HOME/.Xresources"
@@ -1129,6 +1314,12 @@ export DESKTOP_SESSION=dwm
 
 [[ -r "$HOME/.profile" ]] && . "$HOME/.profile"
 
+# Ensure a DBus session exists for tray apps, Polkit, notifications and portals.
+if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]] && command -v dbus-run-session >/dev/null 2>&1 && [[ "${1:-}" != "--dbus-started" ]]; then
+  exec dbus-run-session "$0" --dbus-started "$@"
+fi
+[[ "${1:-}" == "--dbus-started" ]] && shift || true
+
 if command -v xrdb >/dev/null 2>&1 && [[ -r "$HOME/.Xresources" ]]; then
   xrdb -merge "$HOME/.Xresources"
 fi
@@ -1205,6 +1396,69 @@ echo "== ALSA capture devices =="
 arecord -l 2>/dev/null || true
 AUDIOSTATUS
 
+cat > "$LOCAL_BIN/vpi-network-fix.sh" <<'NETFIX'
+#!/usr/bin/env bash
+set -euo pipefail
+
+choice="${1:-status}"
+
+status() {
+  echo "== Network processes =="
+  ps aux | grep -E 'NetworkManager|dhcpcd|wpa_supplicant' | grep -v grep || true
+  echo
+  echo "== Runit services =="
+  for svc in NetworkManager dhcpcd wpa_supplicant; do
+    if [[ -e "/var/service/$svc" ]]; then
+      sudo sv status "$svc" || true
+    else
+      echo "$svc: disabled"
+    fi
+  done
+  echo
+  echo "== Addresses =="
+  ip -4 addr || true
+  echo
+  if command -v nmcli >/dev/null 2>&1; then
+    echo "== NetworkManager =="
+    nmcli general status || true
+    nmcli device status || true
+  fi
+}
+
+case "$choice" in
+  status)
+    status
+    ;;
+  classic)
+    echo "Switching to classic Void networking: dhcpcd + wpa_supplicant"
+    sudo sv down NetworkManager 2>/dev/null || true
+    sudo rm -f /var/service/NetworkManager
+    sudo ln -sf /etc/sv/wpa_supplicant /var/service/wpa_supplicant
+    sudo ln -sf /etc/sv/dhcpcd /var/service/dhcpcd
+    sudo sv up wpa_supplicant 2>/dev/null || true
+    sudo sv up dhcpcd 2>/dev/null || true
+    status
+    ;;
+  nm|networkmanager)
+    echo "Switching to NetworkManager only"
+    sudo sv down dhcpcd 2>/dev/null || true
+    sudo sv down wpa_supplicant 2>/dev/null || true
+    sudo rm -f /var/service/dhcpcd /var/service/wpa_supplicant
+    sudo ln -sf /etc/sv/NetworkManager /var/service/NetworkManager
+    sudo sv up NetworkManager 2>/dev/null || true
+    status
+    echo
+    echo "Connect WiFi with: nmcli device wifi connect 'SSID' password 'PASSWORD'"
+    ;;
+  *)
+    echo "Usage: vpi-network-fix.sh [status|classic|nm]"
+    exit 1
+    ;;
+esac
+NETFIX
+
+chmod +x "$LOCAL_BIN/vpi-network-fix.sh"
+
 cat > "$LOCAL_BIN/vpi-services.sh" <<'SERVICES'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -1214,7 +1468,7 @@ ls -la /var/service
 
 echo
 echo "== Service status =="
-for svc in dbus elogind NetworkManager sddm pipewire pipewire-pulse wireplumber bluetoothd cupsd sshd tailscaled; do
+for svc in dbus elogind NetworkManager dhcpcd wpa_supplicant sddm pipewire pipewire-pulse wireplumber bluetoothd cupsd sshd tailscaled; do
   if [[ -e "/var/service/$svc" ]]; then
     echo
     echo "--- $svc ---"
@@ -1241,7 +1495,7 @@ done
 
 echo
 echo "== Services =="
-for svc in dbus elogind NetworkManager sddm pipewire pipewire-pulse wireplumber; do
+for svc in dbus elogind NetworkManager dhcpcd wpa_supplicant sddm pipewire pipewire-pulse wireplumber; do
   if [[ -e "/var/service/$svc" ]]; then
     sudo sv status "$svc" || true
   else
@@ -1254,7 +1508,7 @@ echo "== Audio =="
 pactl info 2>/dev/null || echo "pactl did not connect yet. Reboot/log in to dwm and test again."
 CHECK
 
-chmod +x "$LOCAL_BIN/audio-status.sh" "$LOCAL_BIN/vpi-services.sh" "$LOCAL_BIN/vpi-check.sh"
+chmod +x "$LOCAL_BIN/audio-status.sh" "$LOCAL_BIN/vpi-services.sh" "$LOCAL_BIN/vpi-check.sh" "$LOCAL_BIN/vpi-network-fix.sh"
 
 ok "Helper scripts created."
 
@@ -1299,7 +1553,10 @@ echo "  alacritty:       $(command -v alacritty || echo missing)"
 echo "  rofi:            $(command -v rofi || echo missing)"
 echo "  picom:           $(command -v picom || echo missing)"
 echo "  dunst:           $(command -v dunst || echo missing)"
-echo "  NetworkManager:  $([[ -e /var/service/NetworkManager ]] && echo enabled || echo missing)"
+echo "  Network backend:   $NETWORK_BACKEND"
+echo "  NetworkManager:  $([[ -e /var/service/NetworkManager ]] && echo enabled || echo disabled)"
+echo "  dhcpcd:          $([[ -e /var/service/dhcpcd ]] && echo enabled || echo disabled)"
+echo "  wpa_supplicant:  $([[ -e /var/service/wpa_supplicant ]] && echo enabled || echo disabled)"
 echo
 
 echo "Audio playback"
