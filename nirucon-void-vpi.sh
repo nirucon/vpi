@@ -18,7 +18,7 @@ IFS=$'\n\t'
 #   - Updates Void safely with XBPS
 #   - Enables useful repositories when available
 #   - Installs Xorg, SDDM, NetworkManager, PipeWire, fish, kitty and desktop tools
-  - Installs a NIRU Noir GTK dark theme selectable in lxappearance
+#   - Installs a NIRU Noir GTK dark theme selectable in lxappearance
 #   - Builds dwm, dmenu, st and slock from your suckless repository
 #   - Installs your look-and-feel repo and NIRU Noir terminal/fish/starship setup
 #   - Creates a clean dwm SDDM session and startx fallback
