@@ -3,7 +3,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 # =============================================================================
-# NIRUCON Void Linux VPI v1.5.0 - Void Post Install for glibc base systems
+# NIRUCON Void Linux VPI v1.7.0 - Void Post Install for glibc base systems
 # =============================================================================
 #
 # Target:
@@ -18,7 +18,7 @@ IFS=$'\n\t'
 #   - Updates Void safely with XBPS
 #   - Enables useful repositories when available
 #   - Installs Xorg, SDDM, NetworkManager, PipeWire, fish, kitty and desktop tools
-#   - Installs a NIRU Noir GTK dark theme selectable in lxappearance
+#   - Installs Arc-Dark + Papirus-Dark as a stable GTK/icon theme for lxappearance
 #   - Builds dwm, dmenu, st and slock from your suckless repository
 #   - Installs your look-and-feel repo and NIRU Noir terminal/fish/starship setup
 #   - Creates a clean dwm SDDM session and startx fallback
@@ -311,7 +311,7 @@ read -r -p "Network choice [1/2/3, default 1]: " NETWORK_CHOICE
 NETWORK_CHOICE="${NETWORK_CHOICE:-1}"
 case "$NETWORK_CHOICE" in
   1) NETWORK_BACKEND="networkmanager" ;;
-  2) NETWORK_BACKEND="networkmanager" ;;
+  2) NETWORK_BACKEND="preserve" ;;
   3) NETWORK_BACKEND="classic" ;;
   *) fail "Invalid network choice."; exit 1 ;;
 esac
@@ -398,14 +398,14 @@ DESKTOP_PACKAGES=(
   libX11-devel libXft-devel libXinerama-devel libXrandr-devel libXext-devel
   libXrender-devel libXfixes-devel harfbuzz-devel imlib2-devel freetype-devel fontconfig-devel
   fontconfig dejavu-fonts-ttf noto-fonts-ttf noto-fonts-emoji font-awesome
-  feh picom rofi dunst libnotify
+  feh picom rofi dunst libnotify xss-lock
   kitty alacritty fish starship zoxide
   maim slop scrot flameshot brightnessctl playerctl pamixer pavucontrol
   pcmanfm gvfs udisks2 udiskie
   fastfetch btop htop ncdu duf jq fzf ripgrep fd eza bat pv sshfs ntfs-3g
-  lm_sensors smartmontools pciutils usbutils
+  lm_sensors smartmontools pciutils usbutils upower acpi
   neovim vim micro
-  lxappearance papirus-icon-theme adwaita-icon-theme hicolor-icon-theme p7zip
+  lxappearance arc-theme papirus-icon-theme adwaita-icon-theme hicolor-icon-theme p7zip
   fuse fuse3
 )
 
@@ -812,15 +812,24 @@ fi
 
 phase "Applying Void slock group compatibility"
 
-# Void normally has a 'nobody' group. Debian needed 'nogroup'. We gently restore
-# the upstream-compatible setting when present.
+# slock must be compiled with an existing low-privilege group. On some Void
+# installs the group is "nogroup" and "nobody" does not exist, which otherwise
+# causes: slock: getgrnam nobody: group entry not found.
+SLOCK_GROUP=""
+if getent group nogroup >/dev/null 2>&1; then
+  SLOCK_GROUP="nogroup"
+elif getent group nobody >/dev/null 2>&1; then
+  SLOCK_GROUP="nobody"
+else
+  warn "Neither group 'nogroup' nor 'nobody' exists. Creating system group 'nogroup' for slock."
+  sudo groupadd -r nogroup 2>/dev/null || true
+  SLOCK_GROUP="nogroup"
+fi
+
 for cfg in "$SUCKLESS_DIR/slock/config.h" "$SUCKLESS_DIR/slock/config.def.h"; do
   if [[ -f "$cfg" ]]; then
-    if getent group nobody >/dev/null 2>&1; then
-      sed -i 's/static const char \*group = "nogroup";/static const char *group = "nobody";/' "$cfg"
-      sed -i 's/static const char \*group = "nobody";/static const char *group = "nobody";/' "$cfg"
-      ok "Patched $cfg for group nobody"
-    fi
+    sed -i -E 's/static const char \*group = "[^"]+";/static const char *group = "'"$SLOCK_GROUP"'";/' "$cfg"
+    ok "Patched $cfg for group $SLOCK_GROUP"
   fi
 done
 
@@ -837,6 +846,17 @@ for app in dwm dmenu st slock; do
     warn "Missing component in suckless repo: $app"
   fi
 done
+
+phase "Fixing slock permissions"
+
+if command -v slock >/dev/null 2>&1; then
+  SLOCK_BIN="$(command -v slock)"
+  sudo chown root:root "$SLOCK_BIN"
+  sudo chmod 4755 "$SLOCK_BIN"
+  ok "slock setuid permissions fixed: $SLOCK_BIN"
+else
+  warn "slock was not found after build/install. Lock screen will not work."
+fi
 
 # -----------------------------------------------------------------------------
 # Look and feel
@@ -1298,142 +1318,59 @@ chmod +x "$LOCAL_BIN/vpi-terminal-check.sh"
 ok "Terminal icons, Nerd Font fallback and fish completion setup hardened."
 
 # -----------------------------------------------------------------------------
-# NIRU Noir GTK dark theme for lxappearance
+# GTK/icon theme for lxappearance
 # -----------------------------------------------------------------------------
 
-phase "Installing NIRU Noir GTK dark theme"
+phase "Configuring Arc-Dark GTK theme for lxappearance"
 
-GTK_THEME_DIR="$HOME/.themes/NIRU-Noir"
-mkdir -p "$GTK_THEME_DIR/gtk-2.0" "$GTK_THEME_DIR/gtk-3.0" "$GTK_THEME_DIR/gtk-4.0" "$HOME/.config/gtk-3.0" "$HOME/.config/gtk-4.0"
+# Arc-Dark is used as the default GTK theme because it is available in the Void
+# repositories, pulls the GTK2 engine it needs, and is more complete across GTK2,
+# GTK3 and common desktop applications than a small custom CSS-only theme.
+# NIRU Noir is still kept as terminal/SDDM/fish styling; GTK uses Arc-Dark for
+# practical consistency in PCManFM, lxappearance, Nextcloud, GIMP and similar apps.
+GTK_THEME="Arc-Dark"
+ICON_THEME="Papirus-Dark"
+CURSOR_THEME="Adwaita"
+GTK_FONT="Sans 10"
 
-cat > "$GTK_THEME_DIR/index.theme" <<'THEMEINDEX'
-[Desktop Entry]
-Type=X-GNOME-Metatheme
-Name=NIRU-Noir
-Comment=Dark black, grey, bone and muted gold theme for NIRUCON Void/dwm
+mkdir -p "$HOME/.config/gtk-3.0" "$HOME/.config/gtk-4.0"
 
-[X-GNOME-Metatheme]
-GtkTheme=NIRU-Noir
-IconTheme=Papirus-Dark
-CursorTheme=Adwaita
-ButtonLayout=:minimize,maximize,close
-THEMEINDEX
+backup_user_file "$HOME/.gtkrc-2.0"
+backup_user_file "$HOME/.config/gtk-3.0/settings.ini"
+backup_user_file "$HOME/.config/gtk-4.0/settings.ini"
 
-cat > "$GTK_THEME_DIR/gtk-3.0/gtk.css" <<'GTKCSS'
-@define-color bg #0b0b0b;
-@define-color bg2 #121212;
-@define-color bg3 #1b1b1b;
-@define-color fg #d6d1c4;
-@define-color muted #8f8f8f;
-@define-color gold #c8b46a;
-@define-color border #35322a;
-@define-color error #9a5a4f;
-
-* {
-  background-clip: padding-box;
-  -GtkToolButton-icon-spacing: 4;
-  -GtkTextView-error-underline-color: @error;
-  -gtk-icon-theme: "Papirus-Dark", "Papirus", "Adwaita";
-}
-
-window, dialog, .background { background-color: @bg; color: @fg; }
-
-button, entry, spinbutton, combobox, notebook > header, toolbar, headerbar, menubar, menu, popover {
-  background-color: @bg2;
-  color: @fg;
-  border-color: @border;
-}
-
-button {
-  border: 1px solid @border;
-  border-radius: 4px;
-  padding: 5px 9px;
-}
-button:hover { border-color: @gold; background-color: @bg3; }
-button:checked, button:active { background-color: #2a2516; border-color: @gold; }
-
-entry, spinbutton, textview text {
-  background-color: #101010;
-  color: @fg;
-  border: 1px solid @border;
-  border-radius: 4px;
-}
-entry:focus { border-color: @gold; }
-
-selection, *:selected { background-color: #3a321d; color: #f2ead3; }
-
-label { color: @fg; }
-label:disabled, button:disabled, entry:disabled { color: #666666; }
-
-menuitem:hover, row:hover { background-color: @bg3; color: @fg; }
-row:selected { background-color: #3a321d; color: #f2ead3; }
-
-scrollbar slider { background-color: #4a4a4a; border-radius: 8px; min-width: 8px; min-height: 8px; }
-scrollbar slider:hover { background-color: @gold; }
-
-headerbar {
-  background-color: #090909;
-  color: @fg;
-  border-bottom: 1px solid @border;
-}
-
-tooltip { background-color: #111111; color: @fg; border: 1px solid @gold; }
-GTKCSS
-
-cp "$GTK_THEME_DIR/gtk-3.0/gtk.css" "$GTK_THEME_DIR/gtk-4.0/gtk.css"
-
-cat > "$GTK_THEME_DIR/gtk-2.0/gtkrc" <<'GTK2RC'
-gtk-theme-name="NIRU-Noir"
-gtk-icon-theme-name="Papirus-Dark"
-gtk-font-name="Sans 10"
-
-style "niru-noir-default" {
-  bg[NORMAL]      = "#0b0b0b"
-  bg[PRELIGHT]    = "#1b1b1b"
-  bg[ACTIVE]      = "#2a2516"
-  bg[SELECTED]    = "#3a321d"
-  fg[NORMAL]      = "#d6d1c4"
-  fg[PRELIGHT]    = "#f2ead3"
-  fg[ACTIVE]      = "#f2ead3"
-  fg[SELECTED]    = "#f2ead3"
-  text[NORMAL]    = "#d6d1c4"
-  base[NORMAL]    = "#101010"
-  base[SELECTED]  = "#3a321d"
-}
-class "*" style "niru-noir-default"
-GTK2RC
-
-# Install the theme and set sane defaults only if the user has not already
-# created GTK settings. lxappearance can change these later.
-if [[ ! -f "$HOME/.gtkrc-2.0" ]]; then
-  cat > "$HOME/.gtkrc-2.0" <<'GTK2USER'
-gtk-theme-name="NIRU-Noir"
-gtk-icon-theme-name="Papirus-Dark"
-gtk-font-name="Sans 10"
+cat > "$HOME/.gtkrc-2.0" <<GTK2USER
+gtk-theme-name="$GTK_THEME"
+gtk-icon-theme-name="$ICON_THEME"
+gtk-cursor-theme-name="$CURSOR_THEME"
+gtk-font-name="$GTK_FONT"
 GTK2USER
-fi
 
-if [[ ! -f "$HOME/.config/gtk-3.0/settings.ini" ]]; then
-  cat > "$HOME/.config/gtk-3.0/settings.ini" <<'GTK3SETTINGS'
+cat > "$HOME/.config/gtk-3.0/settings.ini" <<GTK3SETTINGS
 [Settings]
-gtk-theme-name=NIRU-Noir
-gtk-icon-theme-name=Papirus-Dark
-gtk-font-name=Sans 10
+gtk-theme-name=$GTK_THEME
+gtk-icon-theme-name=$ICON_THEME
+gtk-cursor-theme-name=$CURSOR_THEME
+gtk-font-name=$GTK_FONT
 gtk-application-prefer-dark-theme=true
 GTK3SETTINGS
-fi
 
-if [[ ! -f "$HOME/.config/gtk-4.0/settings.ini" ]]; then
-  cat > "$HOME/.config/gtk-4.0/settings.ini" <<'GTK4SETTINGS'
+cat > "$HOME/.config/gtk-4.0/settings.ini" <<GTK4SETTINGS
 [Settings]
-gtk-theme-name=NIRU-Noir
-gtk-icon-theme-name=Papirus-Dark
-gtk-font-name=Sans 10
+gtk-theme-name=$GTK_THEME
+gtk-icon-theme-name=$ICON_THEME
+gtk-cursor-theme-name=$CURSOR_THEME
+gtk-font-name=$GTK_FONT
 gtk-application-prefer-dark-theme=true
 GTK4SETTINGS
-fi
 
-ok "NIRU Noir GTK theme installed. Activate it in lxappearance as: NIRU-Noir"
+# Make GTK applications started through dbus/portals see the same preference.
+mkdir -p "$HOME/.config/environment.d"
+cat > "$HOME/.config/environment.d/90-nirucon-gtk.conf" <<ENVGTK
+GTK_THEME=$GTK_THEME
+ENVGTK
+
+ok "GTK theme configured: $GTK_THEME + $ICON_THEME. You can adjust it later with lxappearance."
 
 # -----------------------------------------------------------------------------
 # Optional statusbar patch
@@ -1669,7 +1606,7 @@ cat > "$XINITRC_DIR/50-lock.sh" <<'HOOK'
 #!/usr/bin/env bash
 
 if command -v xss-lock >/dev/null 2>&1 && command -v slock >/dev/null 2>&1 && ! pgrep -x xss-lock >/dev/null 2>&1; then
-  xss-lock slock &
+  xss-lock -- slock &
 fi
 HOOK
 
@@ -1944,6 +1881,11 @@ echo "  dwm:             $(command -v dwm || echo missing)"
 echo "  st:              $(command -v st || echo missing)"
 echo "  dmenu:           $(command -v dmenu || echo missing)"
 echo "  slock:           $(command -v slock || echo missing)"
+if command -v slock >/dev/null 2>&1; then
+  SLOCK_BIN_CHECK="$(command -v slock)"
+  SLOCK_PERMS="$(ls -l "$SLOCK_BIN_CHECK" | awk '{print $1, $3, $4, $9}')"
+  echo "  slock perms:     $SLOCK_PERMS"
+fi
 echo "  SDDM:            $(command -v sddm || echo missing)"
 echo "  SDDM service:    $([[ -e /var/service/sddm ]] && echo enabled || echo missing)"
 echo "  SDDM theme:      $(grep -R '^Current=' /etc/sddm.conf.d 2>/dev/null | head -1 || echo missing)"
@@ -2011,12 +1953,14 @@ echo "       nmcli device status"
 echo "  3) Verify services:"
 echo "       vpi-services.sh"
 echo "  4) Activate/check visual theme:"
-echo "       lxappearance # select GTK theme NIRU-Noir and icon theme Papirus-Dark"
+echo "       lxappearance # GTK: Arc-Dark, Icons: Papirus-Dark, Cursor: Adwaita"
 echo "  5) Verify audio playback:"
 echo "       audio-status.sh"
 echo "       pavucontrol"
 echo "  6) Test lock screen:"
 echo "       slock"
+echo "  7) Optional Spotify through Flatpak:"
+echo "       flatpak install flathub com.spotify.Client"
 echo
 echo "Useful commands:"
 echo "  update          # sudo xbps-install -Syu"
