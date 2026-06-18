@@ -482,6 +482,10 @@ ok "Locale and keyboard phase completed."
 
 phase "Applying simple machine profile tuning"
 
+# Void base installations may not include /etc/sysctl.d by default.
+# Create it before writing profile files.
+sudo mkdir -p /etc/sysctl.d
+
 if [[ "$IS_LAPTOP" -eq 1 ]]; then
   sudo tee /etc/sysctl.d/90-nirucon-vpi-laptop.conf >/dev/null <<'SYSCTL'
 # NIRUCON VPI laptop profile.
