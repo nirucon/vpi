@@ -3,7 +3,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 # =============================================================================
-# NIRUCON Void Linux VPI v1.2.0 - Void Post Install for glibc base systems
+# NIRUCON Void Linux VPI v1.5.0 - Void Post Install for glibc base systems
 # =============================================================================
 #
 # Target:
@@ -18,6 +18,7 @@ IFS=$'\n\t'
 #   - Updates Void safely with XBPS
 #   - Enables useful repositories when available
 #   - Installs Xorg, SDDM, NetworkManager, PipeWire, fish, kitty and desktop tools
+  - Installs a NIRU Noir GTK dark theme selectable in lxappearance
 #   - Builds dwm, dmenu, st and slock from your suckless repository
 #   - Installs your look-and-feel repo and NIRU Noir terminal/fish/starship setup
 #   - Creates a clean dwm SDDM session and startx fallback
@@ -295,21 +296,21 @@ INSTALL_MEDIA_APPS=1
 INSTALL_NEXTCLOUD=1
 INSTALL_TAILSCALE=0
 INSTALL_HELIUM=1
-NETWORK_BACKEND="preserve"
+NETWORK_BACKEND="networkmanager"
 
 # Network handling is intentionally conservative. Fresh Void installs often use
 # dhcpcd + wpa_supplicant, while desktop installs often use NetworkManager. Running
 # both at the same time can cause changing IP addresses and dropped SSH sessions.
 echo
 echo "Select network backend:"
-echo "  1) Preserve current active network services (safest, default)"
-echo "  2) NetworkManager only (recommended for laptops after local access is confirmed)"
+echo "  1) NetworkManager only (recommended for laptops, nmtui and dwm WiFi status)"
+echo "  2) Preserve current active network services (safest over unstable SSH)"
 echo "  3) Classic Void: dhcpcd + wpa_supplicant only"
 echo
 read -r -p "Network choice [1/2/3, default 1]: " NETWORK_CHOICE
 NETWORK_CHOICE="${NETWORK_CHOICE:-1}"
 case "$NETWORK_CHOICE" in
-  1) NETWORK_BACKEND="preserve" ;;
+  1) NETWORK_BACKEND="networkmanager" ;;
   2) NETWORK_BACKEND="networkmanager" ;;
   3) NETWORK_BACKEND="classic" ;;
   *) fail "Invalid network choice."; exit 1 ;;
@@ -390,7 +391,7 @@ install_pkg_list "${CORE_PACKAGES[@]}"
 phase "Installing X11, SDDM and dwm build dependencies"
 
 DESKTOP_PACKAGES=(
-  xorg xinit xauth xsetroot xrandr xrdb xclip xsel xprop xwininfo
+  xorg xinit xauth xsetroot xrandr xrdb xclip xsel xprop xwininfo xterm
   setxkbmap xkeyboard-config
   sddm
   NetworkManager network-manager-applet dhcpcd wpa_supplicant
@@ -404,7 +405,7 @@ DESKTOP_PACKAGES=(
   fastfetch btop htop ncdu duf jq fzf ripgrep fd eza bat pv sshfs ntfs-3g
   lm_sensors smartmontools pciutils usbutils
   neovim vim micro
-  lxappearance papirus-icon-theme adwaita-icon-theme p7zip
+  lxappearance papirus-icon-theme adwaita-icon-theme hicolor-icon-theme p7zip
   fuse fuse3
 )
 
@@ -479,40 +480,60 @@ fi
 install_helium_appimage() {
   phase "Installing Helium Browser AppImage"
 
-  # Helium is not packaged in the official Void repositories. The safest Void
-  # route is the upstream AppImage from imputnet/helium-linux releases.
-  # This function is intentionally user-local: it does not place untracked files
-  # in /usr/bin and it can be re-run to update Helium.
+  # Helium is installed as a user-local AppImage on Void. This avoids distro
+  # package assumptions and keeps the browser easy to update or remove.
+  #
+  # Critical detail: Helium publishes more than one CPU architecture. We must
+  # never pick the first AppImage blindly, or an x86_64 machine may receive an
+  # ARM/aarch64 binary and fail with: exec format error.
   local app_dir="$HOME/.local/bin"
   local app_path="$app_dir/helium"
   local desktop_dir="$HOME/.local/share/applications"
   local desktop_file="$desktop_dir/helium.desktop"
-  local tmp_dir api_json url
+  local tmp_dir api_json url machine arch_regex arch_human file_info
 
   mkdir -p "$app_dir" "$desktop_dir"
   tmp_dir="$(mktemp -d)"
 
-  # AppImages usually need FUSE/libfuse support. Install both package names
-  # defensively because availability may vary by Void snapshot.
   install_pkg_list fuse fuse3
 
-  say "Resolving latest Helium AppImage release from GitHub..."
+  machine="$(uname -m)"
+  case "$machine" in
+    x86_64|amd64)
+      arch_regex='(x86_64|amd64)'
+      arch_human='x86-64'
+      ;;
+    aarch64|arm64)
+      arch_regex='(aarch64|arm64)'
+      arch_human='ARM aarch64'
+      ;;
+    *)
+      warn "Unsupported CPU architecture for automatic Helium AppImage install: $machine"
+      warn "Skipping Helium. Install manually if upstream provides a compatible build."
+      rm -rf "$tmp_dir"
+      return 0
+      ;;
+  esac
+
+  say "Detected CPU architecture: $machine"
+  say "Resolving latest Helium AppImage release from GitHub for $arch_human..."
 
   api_json="$tmp_dir/helium-release.json"
   if curl -fsSL "https://api.github.com/repos/imputnet/helium-linux/releases/latest" -o "$api_json"; then
     url="$(grep -E '"browser_download_url":' "$api_json" \
       | cut -d '"' -f4 \
-      | grep -Ei 'helium.*x86_64.*\.AppImage$|helium.*\.AppImage$' \
+      | grep -Ei '\.AppImage$' \
+      | grep -Ei "$arch_regex" \
       | head -n1 || true)"
   else
     url=""
   fi
 
-  # Conservative fallback. If the project ever provides a stable latest asset
-  # called helium.AppImage, this will work without the API parser.
   if [[ -z "${url:-}" ]]; then
-    warn "Could not resolve AppImage through GitHub API. Trying stable latest/download fallback."
-    url="https://github.com/imputnet/helium-linux/releases/latest/download/helium.AppImage"
+    warn "Could not find a Helium AppImage asset matching architecture: $machine"
+    warn "Skipping Helium instead of installing a possibly wrong architecture."
+    rm -rf "$tmp_dir"
+    return 0
   fi
 
   say "Downloading Helium AppImage: $url"
@@ -529,8 +550,26 @@ install_helium_appimage() {
   fi
 
   chmod +x "$tmp_dir/helium.AppImage"
+  file_info="$(file "$tmp_dir/helium.AppImage" 2>/dev/null || true)"
+  say "Downloaded binary type: $file_info"
 
-  # Keep a backup of the previous AppImage if present.
+  case "$machine" in
+    x86_64|amd64)
+      if ! printf '%s\n' "$file_info" | grep -Eiq 'x86-64|x86_64|amd64'; then
+        fail "Refusing to install Helium: downloaded file is not x86_64/amd64."
+        rm -rf "$tmp_dir"
+        return 1
+      fi
+      ;;
+    aarch64|arm64)
+      if ! printf '%s\n' "$file_info" | grep -Eiq 'aarch64|arm64|ARM aarch64'; then
+        fail "Refusing to install Helium: downloaded file is not aarch64/arm64."
+        rm -rf "$tmp_dir"
+        return 1
+      fi
+      ;;
+  esac
+
   if [[ -f "$app_path" ]]; then
     cp -a "$app_path" "$app_path.bak.$(date +%Y%m%d-%H%M%S)" || true
   fi
@@ -538,7 +577,7 @@ install_helium_appimage() {
   mv "$tmp_dir/helium.AppImage" "$app_path"
   chmod +x "$app_path"
 
-  cat > "$desktop_file" <<EOF
+  cat > "$desktop_file" <<HELIUMDESKTOP
 [Desktop Entry]
 Name=Helium
 Comment=Private Chromium-based browser
@@ -548,11 +587,10 @@ Type=Application
 Categories=Network;WebBrowser;
 MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
 StartupNotify=true
-EOF
+HELIUMDESKTOP
 
   chmod 644 "$desktop_file"
 
-  # Refresh desktop database when available. This is optional.
   if have_cmd update-desktop-database; then
     update-desktop-database "$desktop_dir" 2>/dev/null || true
   fi
@@ -677,6 +715,68 @@ case "$NETWORK_BACKEND" in
     enable_service dhcpcd
     ;;
 esac
+
+# Create a small repair/migration helper for later network changes.
+mkdir -p "$LOCAL_BIN"
+cat > "$LOCAL_BIN/vpi-network-fix.sh" <<'NETFIX'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+usage() {
+  echo "Usage: vpi-network-fix.sh [networkmanager|classic|status]"
+  echo
+  echo "  networkmanager  Use NetworkManager only. Disables dhcpcd and standalone wpa_supplicant."
+  echo "  classic         Use dhcpcd + standalone wpa_supplicant only. Disables NetworkManager."
+  echo "  status          Show relevant network service and nmcli status."
+}
+
+link_service() {
+  local svc="$1"
+  if [[ -d "/etc/sv/$svc" && ! -e "/var/service/$svc" ]]; then
+    sudo ln -s "/etc/sv/$svc" "/var/service/$svc"
+  fi
+}
+
+down_service() {
+  local svc="$1"
+  if [[ -e "/var/service/$svc" ]]; then
+    sudo sv down "$svc" 2>/dev/null || true
+    sudo rm -f "/var/service/$svc"
+  fi
+}
+
+up_service() {
+  local svc="$1"
+  link_service "$svc"
+  sudo sv up "$svc" 2>/dev/null || true
+}
+
+case "${1:-status}" in
+  networkmanager|nm)
+    down_service dhcpcd
+    down_service wpa_supplicant
+    up_service dbus
+    up_service NetworkManager
+    echo "NetworkManager is now the selected backend."
+    echo "Use nmtui or nmcli device wifi connect <SSID> password <PASSWORD>."
+    ;;
+  classic)
+    down_service NetworkManager
+    up_service wpa_supplicant
+    up_service dhcpcd
+    echo "Classic Void networking is now the selected backend."
+    ;;
+  status)
+    sudo sv status /var/service/NetworkManager /var/service/dhcpcd /var/service/wpa_supplicant 2>/dev/null || true
+    echo
+    command -v nmcli >/dev/null 2>&1 && nmcli general status || true
+    echo
+    ip -4 addr || true
+    ;;
+  *) usage; exit 1 ;;
+esac
+NETFIX
+chmod +x "$LOCAL_BIN/vpi-network-fix.sh"
 
 enable_service sddm
 
@@ -1053,20 +1153,287 @@ ok "NIRU Noir fish, Kitty, Alacritty, Starship and bat configuration written."
 # Nerd Font
 # -----------------------------------------------------------------------------
 
-phase "Installing JetBrainsMono Nerd Font"
+phase "Installing and verifying JetBrainsMono Nerd Font"
 
 mkdir -p "$HOME/.local/share/fonts/JetBrainsMonoNerd"
 TMPFONT="$(mktemp -d)"
+NERD_ZIP="$TMPFONT/JetBrainsMono.zip"
+NERD_URL="https://github.com/ryanoasis/nerd-fonts/releases/latest/download/JetBrainsMono.zip"
 
-if wget -q -O "$TMPFONT/JetBrainsMono.zip" "https://github.com/ryanoasis/nerd-fonts/releases/latest/download/JetBrainsMono.zip"; then
-  unzip -oq "$TMPFONT/JetBrainsMono.zip" -d "$HOME/.local/share/fonts/JetBrainsMonoNerd"
-  fc-cache -fv >/dev/null || true
-  ok "JetBrainsMono Nerd Font installed."
+if curl -fL --retry 3 --connect-timeout 20 -o "$NERD_ZIP" "$NERD_URL"; then
+  if unzip -tq "$NERD_ZIP" >/dev/null 2>&1; then
+    unzip -oq "$NERD_ZIP" -d "$HOME/.local/share/fonts/JetBrainsMonoNerd"
+    fc-cache -f "$HOME/.local/share/fonts" >/dev/null 2>&1 || fc-cache -fv >/dev/null 2>&1 || true
+    if fc-match 'JetBrainsMono Nerd Font' | grep -qi 'JetBrains'; then
+      ok "JetBrainsMono Nerd Font installed and detected by fontconfig."
+    else
+      warn "JetBrainsMono Nerd Font was extracted, but fontconfig did not detect it cleanly. Icons may need a relogin."
+    fi
+  else
+    warn "Downloaded Nerd Font archive is not a valid zip. Skipping font install."
+  fi
 else
   warn "Could not download JetBrainsMono Nerd Font. Icons may be missing until installed manually."
 fi
 
 rm -rf "$TMPFONT"
+
+phase "Hardening terminal, icons and fish completion setup"
+
+# Use a Nerd Font when available, but do not break terminals if the exact font name differs.
+KITTY_FONT="monospace"
+ALACRITTY_FONT="monospace"
+if fc-match 'JetBrainsMono Nerd Font' | grep -qi 'JetBrains'; then
+  KITTY_FONT="JetBrainsMono Nerd Font"
+  ALACRITTY_FONT="JetBrainsMono Nerd Font"
+elif fc-match 'JetBrainsMonoNL Nerd Font' | grep -qi 'JetBrains'; then
+  KITTY_FONT="JetBrainsMonoNL Nerd Font"
+  ALACRITTY_FONT="JetBrainsMonoNL Nerd Font"
+else
+  warn "No JetBrains Nerd Font detected. Falling back to monospace; eza icons may look plain."
+fi
+
+# Patch terminal configs with the detected/fallback font and keep shell unset.
+if [[ -f "$HOME/.config/kitty/kitty.conf" ]]; then
+  sed -i -E "s/^font_family .*/font_family ${KITTY_FONT}/" "$HOME/.config/kitty/kitty.conf"
+  sed -i -E '/^shell[[:space:]]+/d' "$HOME/.config/kitty/kitty.conf"
+  grep -q '^symbol_map ' "$HOME/.config/kitty/kitty.conf" || cat >> "$HOME/.config/kitty/kitty.conf" <<'KITTY_SYMBOLS'
+
+# Extra icon/private-use glyph coverage for Nerd Font based tools such as eza.
+symbol_map U+E000-U+F8FF,U+F0001-U+F1AF0 JetBrainsMono Nerd Font
+KITTY_SYMBOLS
+fi
+
+if [[ -f "$HOME/.config/alacritty/alacritty.toml" ]]; then
+  sed -i -E "s/family = \"JetBrainsMono[^\"]*\"/family = \"${ALACRITTY_FONT}\"/g" "$HOME/.config/alacritty/alacritty.toml"
+  # Remove any accidental hardcoded shell block from older VPI versions.
+  sed -i '/^\[terminal\.shell\]/,/^\[/ { /^\[/!d; /^\[terminal\.shell\]/d; }' "$HOME/.config/alacritty/alacritty.toml" 2>/dev/null || true
+fi
+
+# Fish completions and interactive behaviour.
+mkdir -p "$HOME/.config/fish/completions" "$HOME/.config/fish/conf.d" "$HOME/.config/fish/functions"
+
+if have_cmd fish; then
+  fish -c 'set -U fish_greeting ""' 2>/dev/null || true
+  fish -c 'set -U fish_key_bindings fish_default_key_bindings' 2>/dev/null || true
+  fish -c 'type -q fish_update_completions; and fish_update_completions' >/dev/null 2>&1 || true
+fi
+
+cat > "$HOME/.config/fish/conf.d/20-nirucon-icons-and-completions.fish" <<'FISHCONF'
+# NIRUCON VPI: icons, completion and Void-friendly aliases.
+
+# Keep terminal output readable and icon-capable when a Nerd Font is installed.
+set -gx EZA_ICONS_AUTO 1
+set -gx EZA_COLORS "di=38;5;180:fi=38;5;252:ln=38;5;245:ex=38;5;222:*.sh=38;5;222:*.md=38;5;250"
+
+# Enable Starship and Zoxide if they are present.
+if status is-interactive
+    if command -q starship
+        starship init fish | source
+    end
+
+    if command -q zoxide
+        zoxide init fish | source
+    end
+
+    # fzf shell integration differs slightly between versions; try safely.
+    if command -q fzf
+        fzf --fish | source 2>/dev/null
+    end
+end
+
+# Modern listing with icons, falling back safely.
+if command -q eza
+    alias ls='eza --icons=auto --group-directories-first'
+    alias ll='eza -lah --icons=auto --group-directories-first'
+    alias la='eza -a --icons=auto --group-directories-first'
+    alias lt='eza --tree --icons=auto --group-directories-first'
+    alias tree='eza --tree --icons=auto --group-directories-first'
+end
+
+# Void helpers.
+alias xi='sudo xbps-install -S'
+alias xu='sudo xbps-install -Syu'
+alias xs='xbps-query -Rs'
+alias xr='sudo xbps-remove -R'
+alias xo='sudo xbps-remove -Oo'
+FISHCONF
+
+# Helper command for checking icon/font/terminal status after install.
+cat > "$LOCAL_BIN/vpi-terminal-check.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "== Shell =="
+echo "SHELL=${SHELL:-unknown}"
+command -v fish || true
+
+echo
+echo "== Terminal binaries =="
+command -v kitty || true
+command -v alacritty || true
+command -v st || true
+
+echo
+echo "== Fontconfig Nerd Font match =="
+fc-match 'JetBrainsMono Nerd Font' || true
+fc-list | grep -i 'JetBrains.*Nerd' | head -10 || true
+
+echo
+echo "== Icons test =="
+if command -v eza >/dev/null 2>&1; then
+  eza --icons=always --group-directories-first "$HOME" | head -20
+else
+  echo "eza missing"
+fi
+
+echo
+echo "== Fish completions =="
+if command -v fish >/dev/null 2>&1; then
+  fish -c 'complete -C "xbps-install -" | head -10' || true
+fi
+EOF
+chmod +x "$LOCAL_BIN/vpi-terminal-check.sh"
+
+ok "Terminal icons, Nerd Font fallback and fish completion setup hardened."
+
+# -----------------------------------------------------------------------------
+# NIRU Noir GTK dark theme for lxappearance
+# -----------------------------------------------------------------------------
+
+phase "Installing NIRU Noir GTK dark theme"
+
+GTK_THEME_DIR="$HOME/.themes/NIRU-Noir"
+mkdir -p "$GTK_THEME_DIR/gtk-2.0" "$GTK_THEME_DIR/gtk-3.0" "$GTK_THEME_DIR/gtk-4.0" "$HOME/.config/gtk-3.0" "$HOME/.config/gtk-4.0"
+
+cat > "$GTK_THEME_DIR/index.theme" <<'THEMEINDEX'
+[Desktop Entry]
+Type=X-GNOME-Metatheme
+Name=NIRU-Noir
+Comment=Dark black, grey, bone and muted gold theme for NIRUCON Void/dwm
+
+[X-GNOME-Metatheme]
+GtkTheme=NIRU-Noir
+IconTheme=Papirus-Dark
+CursorTheme=Adwaita
+ButtonLayout=:minimize,maximize,close
+THEMEINDEX
+
+cat > "$GTK_THEME_DIR/gtk-3.0/gtk.css" <<'GTKCSS'
+@define-color bg #0b0b0b;
+@define-color bg2 #121212;
+@define-color bg3 #1b1b1b;
+@define-color fg #d6d1c4;
+@define-color muted #8f8f8f;
+@define-color gold #c8b46a;
+@define-color border #35322a;
+@define-color error #9a5a4f;
+
+* {
+  background-clip: padding-box;
+  -GtkToolButton-icon-spacing: 4;
+  -GtkTextView-error-underline-color: @error;
+  -gtk-icon-theme: "Papirus-Dark", "Papirus", "Adwaita";
+}
+
+window, dialog, .background { background-color: @bg; color: @fg; }
+
+button, entry, spinbutton, combobox, notebook > header, toolbar, headerbar, menubar, menu, popover {
+  background-color: @bg2;
+  color: @fg;
+  border-color: @border;
+}
+
+button {
+  border: 1px solid @border;
+  border-radius: 4px;
+  padding: 5px 9px;
+}
+button:hover { border-color: @gold; background-color: @bg3; }
+button:checked, button:active { background-color: #2a2516; border-color: @gold; }
+
+entry, spinbutton, textview text {
+  background-color: #101010;
+  color: @fg;
+  border: 1px solid @border;
+  border-radius: 4px;
+}
+entry:focus { border-color: @gold; }
+
+selection, *:selected { background-color: #3a321d; color: #f2ead3; }
+
+label { color: @fg; }
+label:disabled, button:disabled, entry:disabled { color: #666666; }
+
+menuitem:hover, row:hover { background-color: @bg3; color: @fg; }
+row:selected { background-color: #3a321d; color: #f2ead3; }
+
+scrollbar slider { background-color: #4a4a4a; border-radius: 8px; min-width: 8px; min-height: 8px; }
+scrollbar slider:hover { background-color: @gold; }
+
+headerbar {
+  background-color: #090909;
+  color: @fg;
+  border-bottom: 1px solid @border;
+}
+
+tooltip { background-color: #111111; color: @fg; border: 1px solid @gold; }
+GTKCSS
+
+cp "$GTK_THEME_DIR/gtk-3.0/gtk.css" "$GTK_THEME_DIR/gtk-4.0/gtk.css"
+
+cat > "$GTK_THEME_DIR/gtk-2.0/gtkrc" <<'GTK2RC'
+gtk-theme-name="NIRU-Noir"
+gtk-icon-theme-name="Papirus-Dark"
+gtk-font-name="Sans 10"
+
+style "niru-noir-default" {
+  bg[NORMAL]      = "#0b0b0b"
+  bg[PRELIGHT]    = "#1b1b1b"
+  bg[ACTIVE]      = "#2a2516"
+  bg[SELECTED]    = "#3a321d"
+  fg[NORMAL]      = "#d6d1c4"
+  fg[PRELIGHT]    = "#f2ead3"
+  fg[ACTIVE]      = "#f2ead3"
+  fg[SELECTED]    = "#f2ead3"
+  text[NORMAL]    = "#d6d1c4"
+  base[NORMAL]    = "#101010"
+  base[SELECTED]  = "#3a321d"
+}
+class "*" style "niru-noir-default"
+GTK2RC
+
+# Install the theme and set sane defaults only if the user has not already
+# created GTK settings. lxappearance can change these later.
+if [[ ! -f "$HOME/.gtkrc-2.0" ]]; then
+  cat > "$HOME/.gtkrc-2.0" <<'GTK2USER'
+gtk-theme-name="NIRU-Noir"
+gtk-icon-theme-name="Papirus-Dark"
+gtk-font-name="Sans 10"
+GTK2USER
+fi
+
+if [[ ! -f "$HOME/.config/gtk-3.0/settings.ini" ]]; then
+  cat > "$HOME/.config/gtk-3.0/settings.ini" <<'GTK3SETTINGS'
+[Settings]
+gtk-theme-name=NIRU-Noir
+gtk-icon-theme-name=Papirus-Dark
+gtk-font-name=Sans 10
+gtk-application-prefer-dark-theme=true
+GTK3SETTINGS
+fi
+
+if [[ ! -f "$HOME/.config/gtk-4.0/settings.ini" ]]; then
+  cat > "$HOME/.config/gtk-4.0/settings.ini" <<'GTK4SETTINGS'
+[Settings]
+gtk-theme-name=NIRU-Noir
+gtk-icon-theme-name=Papirus-Dark
+gtk-font-name=Sans 10
+gtk-application-prefer-dark-theme=true
+GTK4SETTINGS
+fi
+
+ok "NIRU Noir GTK theme installed. Activate it in lxappearance as: NIRU-Noir"
 
 # -----------------------------------------------------------------------------
 # Optional statusbar patch
@@ -1094,14 +1461,12 @@ phase "Installing NIRU Noir SDDM theme"
 
 mkdir -p "$CACHE_DIR"
 
-if [[ -d "$SDDM_THEME_CACHE/.git" ]]; then
-  say "Updating existing SDDM theme repository..."
-  git -C "$SDDM_THEME_CACHE" fetch --all --prune
-  git -C "$SDDM_THEME_CACHE" pull --ff-only || true
-else
-  say "Cloning SDDM theme repository..."
-  git clone "$SDDM_THEME_REPO" "$SDDM_THEME_CACHE"
-fi
+# Reinstall the SDDM theme on every VPI run. This intentionally discards the
+# cached copy so new upstream changes in the theme repository are pulled cleanly
+# and deployed to /usr/share/sddm/themes/niru-noir every time.
+say "Re-cloning SDDM theme repository for a clean theme deployment..."
+rm -rf "$SDDM_THEME_CACHE"
+git clone "$SDDM_THEME_REPO" "$SDDM_THEME_CACHE"
 
 if [[ -d "$SDDM_THEME_CACHE/theme" ]]; then
   SDDM_THEME_SOURCE="$SDDM_THEME_CACHE/theme"
@@ -1124,22 +1489,60 @@ sudo rsync -a --delete "$SDDM_THEME_SOURCE/" "/usr/share/sddm/themes/$SDDM_THEME
 sudo chown -R root:root "/usr/share/sddm/themes/$SDDM_THEME_ID"
 
 phase "Patching SDDM theme host label if needed"
-# Older/local NIRU Noir theme builds could contain a hardcoded host label such as
-# STUDIO. In QML, sddm.hostName exposes the real hostname from the system, so use
-# that whenever a literal STUDIO label is found. This keeps the rune/noir look but
-# prevents the login screen from showing the wrong machine name.
-if sudo grep -RIl --include='*.qml' --include='*.conf' --include='*.desktop' 'STUDIO' "/usr/share/sddm/themes/$SDDM_THEME_ID" >/tmp/nirucon-vpi-sddm-studio-files 2>/dev/null; then
-  while IFS= read -r f; do
-    [[ -n "$f" ]] || continue
-    sudo cp -a "$f" "$f.bak.$(date +%Y%m%d-%H%M%S)"
-    sudo sed -i -E 's/text:[[:space:]]*"STUDIO"/text: sddm.hostName/g; s/"STUDIO"/sddm.hostName/g' "$f" || true
-    warn "Patched hardcoded SDDM host label in: $f"
-  done < /tmp/nirucon-vpi-sddm-studio-files
-  rm -f /tmp/nirucon-vpi-sddm-studio-files
-else
-  rm -f /tmp/nirucon-vpi-sddm-studio-files
-  ok "No hardcoded STUDIO label found in SDDM theme."
-fi
+# Some NIRU Noir theme revisions may contain a literal host label such as
+# STUDIO. That belongs in the theme repository, not in the installer. VPI patches
+# the installed copy only, so the upstream repo is left untouched.
+#
+# Prefer the dynamic SDDM hostname property for QML text properties. For any
+# remaining literal occurrence, fall back to the current system hostname as a
+# safe visible string instead of leaving the wrong label on the login screen.
+CURRENT_HOSTNAME="$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo void)"
+THEME_DIR="/usr/share/sddm/themes/$SDDM_THEME_ID"
+
+sudo python3 - "$THEME_DIR" "$CURRENT_HOSTNAME" <<'SDDMPATCHPY'
+import pathlib
+import re
+import sys
+
+theme_dir = pathlib.Path(sys.argv[1])
+hostname = sys.argv[2]
+patterns = ["STUDIO", "Studio", "studio"]
+extensions = {".qml", ".conf", ".desktop", ".txt"}
+patched = []
+
+for path in theme_dir.rglob("*"):
+    if not path.is_file() or path.suffix not in extensions:
+        continue
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        continue
+
+    original = text
+
+    text = re.sub(r'(\btext\s*:\s*)["\'](?:STUDIO|Studio|studio)["\']', r'\1sddm.hostName', text)
+
+    for pat in patterns:
+        text = text.replace(pat, hostname)
+
+    text = re.sub(r'(\btext\s*:\s*)["\']' + re.escape(hostname) + r'["\']', r'\1sddm.hostName', text)
+
+    if text != original:
+        backup = path.with_name(path.name + ".bak-vpi")
+        if not backup.exists():
+            backup.write_text(original, encoding="utf-8")
+        path.write_text(text, encoding="utf-8")
+        patched.append(str(path))
+
+if patched:
+    print("Patched SDDM theme hostname label in:")
+    for item in patched:
+        print(f"  {item}")
+else:
+    print("No hardcoded STUDIO-style hostname label found in SDDM theme.")
+SDDMPATCHPY
+
+ok "SDDM hostname label check completed. Current system hostname: $CURRENT_HOSTNAME"
 
 sudo mkdir -p /etc/sddm.conf.d
 sudo tee /etc/sddm.conf.d/10-nirucon.conf >/dev/null <<SDDMCONF
@@ -1574,6 +1977,7 @@ echo "  starship:        $(command -v starship || echo missing)"
 echo "  zoxide:          $(command -v zoxide || echo missing)"
 echo "  eza:             $(command -v eza || echo missing)"
 echo "  bat:             $(command -v bat || echo missing)"
+echo "  GTK theme:       $([[ -d "$HOME/.themes/NIRU-Noir" ]] && echo NIRU-Noir || echo missing)"
 echo
 
 if [[ -d "/usr/share/sddm/themes/$SDDM_THEME_ID" ]]; then
@@ -1601,13 +2005,17 @@ echo
 echo "After reboot:"
 echo "  1) Select dwm in SDDM."
 echo "  2) Verify networking:"
+echo "       vpi-network-fix.sh status"
+echo "       nmtui        # NetworkManager WiFi setup"
 echo "       nmcli device status"
 echo "  3) Verify services:"
 echo "       vpi-services.sh"
-echo "  4) Verify audio playback:"
+echo "  4) Activate/check visual theme:"
+echo "       lxappearance # select GTK theme NIRU-Noir and icon theme Papirus-Dark"
+echo "  5) Verify audio playback:"
 echo "       audio-status.sh"
 echo "       pavucontrol"
-echo "  5) Test lock screen:"
+echo "  6) Test lock screen:"
 echo "       slock"
 echo
 echo "Useful commands:"
